@@ -84,7 +84,40 @@ int k_sendto(int sock_fd, const void *message, size_t message_len, int flags, co
         perror("sendto failed");
         return -1;
     }
+    return sent_bytes;
 }
+
+/*
+k_recvfrom – looks up the receiver - side message buffer to see if any message is
+                                         already received.If yes,
+    it returns the first message and deletes that message from
+        the table.If not,
+    it returns with - 1 and sets a global error variable to ENOMESSAGE,
+    indicating no message has been available in the message buffer.
+    */
+
+int k_recvfrom(int sock_fd, void *buffer, size_t buffer_len, int flags, struct sockaddr *src_addr, socklen_t *src_len)
+{
+    // look at reciever side messsage buffer
+    return -1;
+}
+
+/*k_close – closes the socket and cleans up the corresponding socket entry in the SM
+    and marks the entry as free.
+*/
+
+int k_close(int sock_fd)
+{
+    if (close(sock_fd) < 0)
+    {
+        perror("close failed");
+        return -1;
+    }
+    // clean the corresponding socket entry in the SM
+    printf("socket with fd :%d closed sucessfullly\n", sock_fd);
+    return 0;
+}
+
 int dropMessage(float p)
 {
     float r = (float)rand() / RAND_MAX;
