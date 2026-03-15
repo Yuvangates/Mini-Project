@@ -1,11 +1,4 @@
 #include "ksocket.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <errno.h>
-
 /*
 k_socket – This function opens an UDP socket with the socket call. The parameters
 to these are the same as the normal socket() call, except that it will take only
@@ -21,18 +14,62 @@ int k_socket(int family, int type, int protocol)
     {
         return -1;
     }
-    // check for the free space in the SM
-    // -1 if no free space is available
-    int sock_fd = socket(family, SOCK_DGRAM, protocol);
-    if (sock_fd < 0)
-    {
-        perror("udp socket creation failed");
-        return -1;
-    }
-    printf("socket created with fd : %d\n", sock_fd);
-    return sock_fd;
-}
 
+    key_t key = ftok(FTOK_FILE, FTOK_PROJ_ID);
+    if (key == -1)
+    {
+        perror("initksocket: ftok failed");
+        exit(1);
+    }
+    int shmid = shmget(key, sizeof(Shared_Mem) * MAX_SOCKETS, IPC_CREAT | 0666);
+    if (shmid == -1)
+    {
+        perror("initksocket: shmget failed");
+        exit(1);
+    }
+
+    Shared_Mem *SM = (Shared_Mem *)shmat(shmid, NULL, 0);
+    if (SM == (void *)-1)
+    {
+        perror("initksocket: shmat failed");
+        exit(1);
+    }
+
+    for (int i = 0; i < MAX_SOCKETS; i++)
+    {
+        pthread_mutex_lock(&SM[i].mutex);
+        if (SM[i].isFree)
+        {
+            SM[i].isFree = false;
+            SM[i].udp_sock_fd = socket(family, SOCK_DGRAM, protocol);
+            if (SM[i].udp_sock_fd < 0)
+            {
+                perror("udp socket creation failed");
+                SM[i].isFree = true; // Mark as free again
+                pthread_mutex_unlock(&SM[i].mutex);
+                return -1;
+            }
+            pthread_mutex_unlock(&SM[i].mutex);
+            printf("socket created with fd : %d\n", SM[i].udp_sock_fd);
+            return SM[i].udp_sock_fd;
+            // 1. Critical section to update the SM with the new socket information
+            // --- CRITICAL SECTION START ---
+
+            // Check if there is space in the send buffer
+            // Copy the message into SM->sockets[ktp_sockfd].send_buffer
+            // Update any necessary pointers or window sizes
+
+            // --- CRITICAL SECTION END ---
+
+            // 2. Unlock so Thread S can read the buffer and transmit it
+        }
+        // check for the free space in the SM
+        // -1 if no free space is available
+        pthread_mutex_unlock(&SM[i].mutex);
+    }
+
+    return -1;
+}
 /*
 k_bind – binds the socket with some address-port using the bind call. Bind is
 necessary for each KTP socket irrespective of whether it is used as a server or a
