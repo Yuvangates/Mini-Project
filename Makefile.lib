@@ -1,0 +1,16 @@
+# Makefile to generate libksocket.a
+
+CC = gcc
+CFLAGS = -Wall -g
+
+# Target to build the static library
+libksocket.a: ksocket.o
+	ar rcs libksocket.a ksocket.o
+
+# Compile the C file into an object file
+ksocket.o: ksocket.c ksocket.h
+	$(CC) $(CFLAGS) -c ksocket.c
+
+# Clean rule specific to the library
+clean:
+	rm -f ksocket.o libksocket.a

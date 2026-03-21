@@ -1,34 +1,51 @@
+#ifndef KSOCKET_H
+#define KSOCKET_H
+
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <pthread.h>
+#include <time.h>
 #include <netinet/in.h>
-#include <sys/types.h> // Required for the key_t data type
+#include <sys/types.h>
 #include <sys/ipc.h>
 
 #define T 5
-#define DROP_PROB 0.5
+#define DROP_PROB 0.05
 #define MAX_SOCKETS 100
 #define SOCK_KTP 0x1234
 #define ENOTBOUND 1000
 #define ENOSPACE 1001
 #define ENOMESSAGE 1002
+#define MAX_PAYLOAD_SIZE 512
 
-#define FTOK_FILE "ksocket.h" // This file must exist in the directory you run the code from
+#define FTOK_FILE "ksocket.h"
 #define FTOK_PROJ_ID 'K'
+#define MAX_PACKET_SIZE (sizeof(ktp_header) + MAX_PAYLOAD_SIZE)
+
+extern int my_errno;
+
+typedef struct
+{
+    char type;       // 'D' for Data, 'A' for ACK
+    uint8_t seq_num; // 8-bit sequence number (0 to 255, automatically wraps)
+    int window_size; // Used by ACKs to piggyback the rwnd size
+} ktp_header;
 
 struct swnd
 {
-    int seq_num[256];
+    uint8_t unack_seq;
+    uint8_t next_seq_to_send;
     int window_size;
 } typedef sender_wnd;
 
 struct rwnd
 {
-    int seq_num[256];
+    uint8_t expected_seq;
     int window_size;
 } typedef reciever_wnd;
 
@@ -37,20 +54,36 @@ typedef struct
     bool isFree;
     pid_t pid;
     int udp_sock_fd;
-    char *des_ip;
+    char des_ip[INET_ADDRSTRLEN];
     int des_port;
-    char *send_buffer[256];
-    char *recv_buffer[256];
+    uint16_t local_port;
+
+    char send_buffer[10][MAX_PAYLOAD_SIZE];
+    char recv_buffer[10][MAX_PAYLOAD_SIZE];
+
+    int send_head;
+    int send_count;
+
+    int user_read_head;           // Index where user application reads from
+    int recv_head;                // Index where the next expected_seq goes
+    int recv_count;               // Contiguous in-order messages ready for user
+    int total_messages_in_buffer; // Total messages (including out-of-order)
+    bool recv_valid[10];          // Tracks which slots have unread data
+    bool nospace;                 // Flag for when buffer hits 0 free space
+
     sender_wnd swnd;
     reciever_wnd rwnd;
+
+    time_t last_msg_time;
+
     pthread_mutex_t mutex;
 } Shared_Mem;
 
 int k_socket(int family, int type, int protocol);
 int k_bind(int sockfd, const struct sockaddr *src_addr, socklen_t src_len, const struct sockaddr *dest_addr, socklen_t dest_len);
-
 int k_sendto(int sock_fd, const void *message, size_t message_len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len);
-
 int k_recvfrom(int sock_fd, void *buffer, size_t buffer_len, int flags, struct sockaddr *src_addr, socklen_t *src_len);
 int k_close(int sock_fd);
 int dropMessage(float p);
+
+#endif

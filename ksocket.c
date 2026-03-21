@@ -1,39 +1,40 @@
-#include "ksocket.h"
 /*
-k_socket – This function opens an UDP socket with the socket call. The parameters
-to these are the same as the normal socket() call, except that it will take only
-SOCK_KTP as the socket type. k_socket() checks whether a free space is
-available in the SM, creates the corresponding UDP socket if a free space is
-available, and initializes SM with corresponding entries. If no free space is available,
-it returns -1 with the global error variable set to ENOSPACE.
+=====================================================
+Mini Project 1 Submission
+Group Details :
+Member 1 Name : Dake Yuvan Gates
+Member 1 Roll number : 23CS10015
+Member 2 Name : Marala Sai Pragnaan
+Member 2 Roll number : 23CS10043
+=====================================================
 */
+
+#include "ksocket.h"
+#include <sys/shm.h>
+#include <arpa/inet.h>
+#include <string.h>
+
+Shared_Mem *SM = NULL;
+int my_errno = 0;
+
+int attach_shared_memory()
+{
+    if (SM != NULL)
+        return 0;
+    key_t key = ftok(FTOK_FILE, FTOK_PROJ_ID);
+    int shmid = shmget(key, sizeof(Shared_Mem) * MAX_SOCKETS, 0666);
+    SM = (Shared_Mem *)shmat(shmid, NULL, 0);
+    if (SM == (void *)-1)
+        return -1;
+    return 0;
+}
 
 int k_socket(int family, int type, int protocol)
 {
     if (type != SOCK_KTP)
-    {
         return -1;
-    }
-
-    key_t key = ftok(FTOK_FILE, FTOK_PROJ_ID);
-    if (key == -1)
-    {
-        perror("initksocket: ftok failed");
-        exit(1);
-    }
-    int shmid = shmget(key, sizeof(Shared_Mem) * MAX_SOCKETS, IPC_CREAT | 0666);
-    if (shmid == -1)
-    {
-        perror("initksocket: shmget failed");
-        exit(1);
-    }
-
-    Shared_Mem *SM = (Shared_Mem *)shmat(shmid, NULL, 0);
-    if (SM == (void *)-1)
-    {
-        perror("initksocket: shmat failed");
-        exit(1);
-    }
+    if (attach_shared_memory() < 0)
+        return -1;
 
     for (int i = 0; i < MAX_SOCKETS; i++)
     {
@@ -41,129 +42,174 @@ int k_socket(int family, int type, int protocol)
         if (SM[i].isFree)
         {
             SM[i].isFree = false;
-            SM[i].udp_sock_fd = socket(family, SOCK_DGRAM, protocol);
-            if (SM[i].udp_sock_fd < 0)
-            {
-                perror("udp socket creation failed");
-                SM[i].isFree = true; // Mark as free again
-                pthread_mutex_unlock(&SM[i].mutex);
-                return -1;
-            }
+            SM[i].pid = getpid();
+            SM[i].udp_sock_fd = -1;
+            SM[i].local_port = 0;
+
+            SM[i].send_count = 0;
+            SM[i].send_head = 0;
+
+            SM[i].user_read_head = 0;
+            SM[i].recv_head = 0;
+            SM[i].recv_count = 0;
+            SM[i].total_messages_in_buffer = 0;
+            SM[i].nospace = false;
+
+            for (int j = 0; j < 10; j++)
+                SM[i].recv_valid[j] = false;
+
+            // Seq numbers start at 1 [cite: 38]
+            SM[i].swnd.unack_seq = 1;
+            SM[i].swnd.next_seq_to_send = 1;
+            SM[i].swnd.window_size = 10;
+
+            SM[i].rwnd.expected_seq = 1;
+            SM[i].rwnd.window_size = 10;
+
+            SM[i].last_msg_time = 0;
+
             pthread_mutex_unlock(&SM[i].mutex);
-            printf("socket created with fd : %d\n", SM[i].udp_sock_fd);
-            return SM[i].udp_sock_fd;
-            // 1. Critical section to update the SM with the new socket information
-            // --- CRITICAL SECTION START ---
-
-            // Check if there is space in the send buffer
-            // Copy the message into SM->sockets[ktp_sockfd].send_buffer
-            // Update any necessary pointers or window sizes
-
-            // --- CRITICAL SECTION END ---
-
-            // 2. Unlock so Thread S can read the buffer and transmit it
+            return i;
         }
-        // check for the free space in the SM
-        // -1 if no free space is available
         pthread_mutex_unlock(&SM[i].mutex);
     }
-
+    my_errno = ENOSPACE;
     return -1;
 }
-/*
-k_bind – binds the socket with some address-port using the bind call. Bind is
-necessary for each KTP socket irrespective of whether it is used as a server or a
-client. This function takes the source IP, the source port, the destination IP and the
-destination port. It binds the UDP socket with the source IP and source port, and
-updates the corresponding SM with the destination IP and destination port.
-*/
 
 int k_bind(int sockfd, const struct sockaddr *src_addr, socklen_t src_len, const struct sockaddr *dest_addr, socklen_t dest_len)
 {
-    if (bind(sockfd, src_addr, src_len) < 0)
-    {
-        perror("bind failed");
+    if (attach_shared_memory() < 0 || sockfd < 0 || sockfd >= MAX_SOCKETS)
         return -1;
-    }
 
+    struct sockaddr_in *dest_addr_in = (struct sockaddr_in *)dest_addr;
     struct sockaddr_in *src_addr_in = (struct sockaddr_in *)src_addr;
-    // update the corresponding SM with the destination IP and destination port
-    printf("socket with fd :%d binded successfully to port :%d\n", sockfd, ntohs(src_addr_in->sin_port));
+
+    pthread_mutex_lock(&SM[sockfd].mutex);
+    SM[sockfd].local_port = ntohs(src_addr_in->sin_port);
+    inet_ntop(AF_INET, &(dest_addr_in->sin_addr), SM[sockfd].des_ip, INET_ADDRSTRLEN);
+    SM[sockfd].des_port = ntohs(dest_addr_in->sin_port);
+    pthread_mutex_unlock(&SM[sockfd].mutex);
+
     return 0;
 }
 
-// where should i implement SM? in this same file or separate file? give answer?
-
-/*
-k_sendto – writes the message to the sender side message buffer if the destination
-        IP /
-    Port matches with the bounded IP / Port as set through k_bind().If not,
-    it drops
-    the message,
-    returns - 1 and sets the global error variable to ENOTBOUND.If there
-              is no space is the send buffer,
-    return -1 and set the global error variable to
-            ENOSPACE.Note that you need to define these error variables properly in a header
-            file.
-*/
-
 int k_sendto(int sock_fd, const void *message, size_t message_len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len)
 {
-    // check dest ip / port bounded ip/port
-    if (dropMessage(DROP_PROB))
-    {
-        printf("Message dropped due to network conditions\n");
+    if (attach_shared_memory() < 0 || sock_fd < 0 || sock_fd >= MAX_SOCKETS)
         return -1;
-    }
-    ssize_t sent_bytes = sendto(sock_fd, message, message_len, flags, dest_addr, dest_len);
-    if (sent_bytes < 0)
-    {
-        perror("sendto failed");
-        return -1;
-    }
-    return sent_bytes;
-}
 
-/*
-k_recvfrom – looks up the receiver - side message buffer to see if any message is
-                                         already received.If yes,
-    it returns the first message and deletes that message from
-        the table.If not,
-    it returns with - 1 and sets a global error variable to ENOMESSAGE,
-    indicating no message has been available in the message buffer.
-    */
+    struct sockaddr_in *dest_addr_in = (struct sockaddr_in *)dest_addr;
+    char req_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(dest_addr_in->sin_addr), req_ip, INET_ADDRSTRLEN);
+    int req_port = ntohs(dest_addr_in->sin_port);
+
+    pthread_mutex_lock(&SM[sock_fd].mutex);
+    if (strcmp(req_ip, SM[sock_fd].des_ip) != 0 || req_port != SM[sock_fd].des_port)
+    {
+        my_errno = ENOTBOUND;
+        pthread_mutex_unlock(&SM[sock_fd].mutex);
+        return -1;
+    }
+
+    if (SM[sock_fd].send_count >= 10)
+    {
+        my_errno = ENOSPACE;
+        pthread_mutex_unlock(&SM[sock_fd].mutex);
+        return -1;
+    }
+
+    int write_index = SM[sock_fd].send_head;
+    size_t copy_len = (message_len > MAX_PAYLOAD_SIZE) ? MAX_PAYLOAD_SIZE : message_len;
+
+    memset(SM[sock_fd].send_buffer[write_index], 0, MAX_PAYLOAD_SIZE);
+    memcpy(SM[sock_fd].send_buffer[write_index], message, copy_len);
+
+    SM[sock_fd].send_head = (write_index + 1) % 10;
+    SM[sock_fd].send_count++;
+
+    pthread_mutex_unlock(&SM[sock_fd].mutex);
+    return copy_len;
+}
 
 int k_recvfrom(int sock_fd, void *buffer, size_t buffer_len, int flags, struct sockaddr *src_addr, socklen_t *src_len)
 {
-    // look at reciever side messsage buffer
-    return -1;
-}
+    if (attach_shared_memory() < 0 || sock_fd < 0 || sock_fd >= MAX_SOCKETS)
+        return -1;
 
-/*k_close – closes the socket and cleans up the corresponding socket entry in the SM
-    and marks the entry as free.
-*/
+    pthread_mutex_lock(&SM[sock_fd].mutex);
+
+    if (SM[sock_fd].recv_count <= 0)
+    {
+        my_errno = ENOMESSAGE;
+        pthread_mutex_unlock(&SM[sock_fd].mutex);
+        return -1;
+    }
+
+    int read_index = SM[sock_fd].user_read_head;
+    size_t copy_len = (buffer_len > MAX_PAYLOAD_SIZE) ? MAX_PAYLOAD_SIZE : buffer_len;
+    memcpy(buffer, SM[sock_fd].recv_buffer[read_index], copy_len);
+
+    // Clear out the slot
+    SM[sock_fd].recv_valid[read_index] = false;
+    memset(SM[sock_fd].recv_buffer[read_index], 0, MAX_PAYLOAD_SIZE);
+
+    SM[sock_fd].user_read_head = (read_index + 1) % 10;
+    SM[sock_fd].recv_count--;
+    SM[sock_fd].total_messages_in_buffer--;
+
+    // Populate the source details for the user application
+    if (src_addr != NULL && src_len != NULL)
+    {
+        struct sockaddr_in *src_addr_in = (struct sockaddr_in *)src_addr;
+        src_addr_in->sin_family = AF_INET;
+        src_addr_in->sin_port = htons(SM[sock_fd].des_port);
+        inet_pton(AF_INET, SM[sock_fd].des_ip, &(src_addr_in->sin_addr));
+        *src_len = sizeof(struct sockaddr_in);
+    }
+
+    pthread_mutex_unlock(&SM[sock_fd].mutex);
+    return copy_len;
+}
 
 int k_close(int sock_fd)
 {
-    if (close(sock_fd) < 0)
-    {
-        perror("close failed");
+    if (attach_shared_memory() < 0 || sock_fd < 0 || sock_fd >= MAX_SOCKETS)
         return -1;
+
+    // FIX: Graceful Shutdown. Wait for all buffered messages to be ACKed!
+    while (1)
+    {
+        pthread_mutex_lock(&SM[sock_fd].mutex);
+        if (SM[sock_fd].send_count == 0)
+        {
+            pthread_mutex_unlock(&SM[sock_fd].mutex);
+            break;
+        }
+        pthread_mutex_unlock(&SM[sock_fd].mutex);
+        usleep(50000); // Wait 50ms before checking again
     }
-    // clean the corresponding socket entry in the SM
-    printf("socket with fd :%d closed sucessfullly\n", sock_fd);
+
+    // Now safely tear down the socket
+    pthread_mutex_lock(&SM[sock_fd].mutex);
+
+    if (SM[sock_fd].udp_sock_fd >= 0)
+    {
+        close(SM[sock_fd].udp_sock_fd);
+        SM[sock_fd].udp_sock_fd = -1;
+    }
+
+    SM[sock_fd].pid = 0;
+    memset(SM[sock_fd].des_ip, 0, INET_ADDRSTRLEN);
+    SM[sock_fd].des_port = 0;
+    SM[sock_fd].isFree = true;
+
+    pthread_mutex_unlock(&SM[sock_fd].mutex);
     return 0;
 }
 
 int dropMessage(float p)
 {
     float r = (float)rand() / RAND_MAX;
-    if (r < p)
-    {
-        return 1;
-    }
-    else
-    {
-        return 0;
-    }
+    return (r < p) ? 1 : 0;
 }
