@@ -105,7 +105,7 @@ void *R_handler(void *arg)
                                (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
                         printf("Thread R: Sent duplicate ACK (Seq %d) due to freed space. Resetting nospace.\n", ack_pkt.seq_num);
-                        SM[i].nospace = false;
+                        // SM[i].nospace = false;
                     }
                     pthread_mutex_unlock(&SM[i].mutex);
                 }
@@ -187,6 +187,16 @@ void *R_handler(void *arg)
                                 {
                                     // Out of order [cite: 43]
                                     printf("Thread R: Buffered OUT-OF-ORDER Seq %d (Expected %d). No ACK sent.\n", header->seq_num, expected);
+                                }
+
+                                free_space = 10 - SM[i].total_messages_in_buffer;
+                                if (free_space == 0)
+                                {
+                                    SM[i].nospace = true;
+                                }
+                                else
+                                {
+                                    SM[i].nospace = false; // We got new data! Sender is clearly active. Safe to turn off beacon.
                                 }
                             }
                         }
