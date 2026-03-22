@@ -15,7 +15,7 @@
 #include <sys/ipc.h>
 
 #define T 5
-#define DROP_PROB 0.05
+#define DROP_PROB 0.15
 #define MAX_SOCKETS 100
 #define SOCK_KTP 0x1234
 #define ENOTBOUND 1000
@@ -31,9 +31,10 @@ extern int my_errno;
 
 typedef struct
 {
-    char type;       // 'D' for Data, 'A' for ACK
-    uint8_t seq_num; // 8-bit sequence number (0 to 255, automatically wraps)
-    int window_size; // Used by ACKs to piggyback the rwnd size
+    char type;
+    uint8_t seq_num;
+    int window_size;
+    uint16_t payload_len;
 } ktp_header;
 
 struct swnd
@@ -59,17 +60,22 @@ typedef struct
     uint16_t local_port;
 
     char send_buffer[10][MAX_PAYLOAD_SIZE];
+    int send_len[10];
     char recv_buffer[10][MAX_PAYLOAD_SIZE];
+    int recv_len[10];
 
     int send_head;
     int send_count;
 
-    int user_read_head;           // Index where user application reads from
-    int recv_head;                // Index where the next expected_seq goes
-    int recv_count;               // Contiguous in-order messages ready for user
-    int total_messages_in_buffer; // Total messages (including out-of-order)
-    bool recv_valid[10];          // Tracks which slots have unread data
-    bool nospace;                 // Flag for when buffer hits 0 free space
+    int user_read_head;
+    int recv_head;
+    int recv_count;
+    int total_messages_in_buffer;
+    bool recv_valid[10];
+    bool nospace;
+
+    int total_app_messages;
+    int total_udp_transmissions;
 
     sender_wnd swnd;
     reciever_wnd rwnd;

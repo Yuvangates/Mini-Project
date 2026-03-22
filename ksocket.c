@@ -55,10 +55,12 @@ int k_socket(int family, int type, int protocol)
             SM[i].total_messages_in_buffer = 0;
             SM[i].nospace = false;
 
+            SM[i].total_app_messages = 0;
+            SM[i].total_udp_transmissions = 0;
+
             for (int j = 0; j < 10; j++)
                 SM[i].recv_valid[j] = false;
 
-            // Seq numbers start at 1 [cite: 38]
             SM[i].swnd.unack_seq = 1;
             SM[i].swnd.next_seq_to_send = 1;
             SM[i].swnd.window_size = 10;
@@ -125,6 +127,8 @@ int k_sendto(int sock_fd, const void *message, size_t message_len, int flags, co
     memset(SM[sock_fd].send_buffer[write_index], 0, MAX_PAYLOAD_SIZE);
     memcpy(SM[sock_fd].send_buffer[write_index], message, copy_len);
 
+    SM[sock_fd].send_len[write_index] = copy_len;
+    SM[sock_fd].total_app_messages++;
     SM[sock_fd].send_head = (write_index + 1) % 10;
     SM[sock_fd].send_count++;
 
@@ -147,10 +151,10 @@ int k_recvfrom(int sock_fd, void *buffer, size_t buffer_len, int flags, struct s
     }
 
     int read_index = SM[sock_fd].user_read_head;
-    size_t copy_len = (buffer_len > MAX_PAYLOAD_SIZE) ? MAX_PAYLOAD_SIZE : buffer_len;
+    int actual_len = SM[sock_fd].recv_len[read_index];
+    size_t copy_len = (buffer_len > actual_len) ? actual_len : buffer_len;
     memcpy(buffer, SM[sock_fd].recv_buffer[read_index], copy_len);
 
-    // Clear out the slot
     SM[sock_fd].recv_valid[read_index] = false;
     memset(SM[sock_fd].recv_buffer[read_index], 0, MAX_PAYLOAD_SIZE);
 
@@ -158,7 +162,6 @@ int k_recvfrom(int sock_fd, void *buffer, size_t buffer_len, int flags, struct s
     SM[sock_fd].recv_count--;
     SM[sock_fd].total_messages_in_buffer--;
 
-    // Populate the source details for the user application
     if (src_addr != NULL && src_len != NULL)
     {
         struct sockaddr_in *src_addr_in = (struct sockaddr_in *)src_addr;
@@ -177,7 +180,6 @@ int k_close(int sock_fd)
     if (attach_shared_memory() < 0 || sock_fd < 0 || sock_fd >= MAX_SOCKETS)
         return -1;
 
-    // FIX: Graceful Shutdown. Wait for all buffered messages to be ACKed!
     while (1)
     {
         pthread_mutex_lock(&SM[sock_fd].mutex);
@@ -187,16 +189,25 @@ int k_close(int sock_fd)
             break;
         }
         pthread_mutex_unlock(&SM[sock_fd].mutex);
-        usleep(50000); // Wait 50ms before checking again
+        usleep(50000);
     }
 
-    // Now safely tear down the socket
     pthread_mutex_lock(&SM[sock_fd].mutex);
 
     if (SM[sock_fd].udp_sock_fd >= 0)
     {
         close(SM[sock_fd].udp_sock_fd);
         SM[sock_fd].udp_sock_fd = -1;
+    }
+
+    if (SM[sock_fd].total_app_messages > 0)
+    {
+        printf("\n=== KTP SOCKET %d STATS ===\n", sock_fd);
+        printf("App Messages Given: %d\n", SM[sock_fd].total_app_messages);
+        printf("UDP Transmissions:  %d\n", SM[sock_fd].total_udp_transmissions);
+        printf("Average Transmissions per Message: %.2f\n",
+               (float)SM[sock_fd].total_udp_transmissions / SM[sock_fd].total_app_messages);
+        printf("===========================\n\n");
     }
 
     SM[sock_fd].pid = 0;

@@ -30,7 +30,6 @@ void *R_handler(void *arg)
         FD_ZERO(&read_fds);
         max_fd = 0;
 
-        // Create and bind underlying UDP sockets if user called k_bind()
         for (int i = 0; i < MAX_SOCKETS; i++)
         {
             if (!SM[i].isFree && SM[i].udp_sock_fd == -1 && SM[i].local_port != 0)
@@ -79,7 +78,6 @@ void *R_handler(void *arg)
             break;
         }
 
-        // Handle Timeout & nospace flag [cite: 91, 92]
         if (activity == 0)
         {
             for (int i = 0; i < MAX_SOCKETS; i++)
@@ -105,7 +103,6 @@ void *R_handler(void *arg)
                                (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
                         printf("Thread R: Sent duplicate ACK (Seq %d) due to freed space. Resetting nospace.\n", ack_pkt.seq_num);
-                        // SM[i].nospace = false;
                     }
                     pthread_mutex_unlock(&SM[i].mutex);
                 }
@@ -132,7 +129,7 @@ void *R_handler(void *arg)
                 {
                     if (dropMessage(DROP_PROB))
                     {
-                        continue; // Simulated loss
+                        continue;
                     }
 
                     ktp_header *header = (ktp_header *)packet_buffer;
@@ -144,25 +141,23 @@ void *R_handler(void *arg)
                     if (header->type == 'D')
                     {
                         uint8_t expected = SM[i].rwnd.expected_seq;
-                        uint8_t offset = header->seq_num - expected; // 8-bit math handles wraparound!
+                        uint8_t offset = header->seq_num - expected;
                         int free_space = 10 - SM[i].total_messages_in_buffer;
 
                         if (offset < free_space)
-                        { // Message is within window
+                        {
                             int write_index = (SM[i].recv_head + offset) % 10;
 
-                            // Buffer it if we don't already have it
                             if (!SM[i].recv_valid[write_index])
                             {
                                 memset(SM[i].recv_buffer[write_index], 0, MAX_PAYLOAD_SIZE);
                                 memcpy(SM[i].recv_buffer[write_index], payload, payload_len);
                                 SM[i].recv_valid[write_index] = true;
                                 SM[i].total_messages_in_buffer++;
+                                SM[i].recv_len[write_index] = header->payload_len;
 
                                 if (offset == 0)
                                 {
-                                    // It's the expected IN-ORDER message
-                                    // Slide window past any contiguous buffered messages
                                     while (SM[i].recv_valid[SM[i].recv_head] && SM[i].recv_count < 10)
                                     {
                                         SM[i].rwnd.expected_seq++;
@@ -173,8 +168,6 @@ void *R_handler(void *arg)
                                     free_space = 10 - SM[i].total_messages_in_buffer;
                                     if (free_space == 0)
                                         SM[i].nospace = true;
-
-                                    // Send ACK for the highest contiguous sequence received [cite: 89]
                                     ktp_header ack_pkt;
                                     ack_pkt.type = 'A';
                                     ack_pkt.seq_num = SM[i].rwnd.expected_seq - 1;
@@ -185,7 +178,6 @@ void *R_handler(void *arg)
                                 }
                                 else
                                 {
-                                    // Out of order [cite: 43]
                                     printf("Thread R: Buffered OUT-OF-ORDER Seq %d (Expected %d). No ACK sent.\n", header->seq_num, expected);
                                 }
 
@@ -196,13 +188,12 @@ void *R_handler(void *arg)
                                 }
                                 else
                                 {
-                                    SM[i].nospace = false; // We got new data! Sender is clearly active. Safe to turn off beacon.
+                                    SM[i].nospace = false;
                                 }
                             }
                         }
                         else if (offset >= free_space && offset > 128)
                         {
-                            // High offset means sequence is OLD/DUPLICATE (wrapped back around) [cite: 44]
                             ktp_header ack_pkt;
                             ack_pkt.type = 'A';
                             ack_pkt.seq_num = expected - 1;
@@ -215,11 +206,10 @@ void *R_handler(void *arg)
                     else if (header->type == 'A')
                     {
                         uint8_t unack = SM[i].swnd.unack_seq;
-                        uint8_t offset = header->seq_num - unack; // Distance from unack base
+                        uint8_t offset = header->seq_num - unack;
 
                         if (offset < SM[i].send_count)
                         {
-                            // NEW ACK: It acknowledges (offset + 1) messages
                             int acked_messages = offset + 1;
                             SM[i].send_count -= acked_messages;
                             if (SM[i].send_count < 0)
@@ -230,7 +220,6 @@ void *R_handler(void *arg)
                         }
                         else
                         {
-                            // DUPLICATE ACK: Just update the window size [cite: 94]
                             SM[i].swnd.window_size = header->window_size;
                         }
                     }
@@ -247,7 +236,7 @@ void *S_handler(void *arg)
 {
     while (1)
     {
-        usleep((T * 1000000) / 2); // Sleep for T/2 seconds
+        usleep((T * 1000000) / 2);
         time_t current_time = time(NULL);
 
         for (int i = 0; i < MAX_SOCKETS; i++)
@@ -257,15 +246,12 @@ void *S_handler(void *arg)
 
             pthread_mutex_lock(&SM[i].mutex);
 
-            // 1. Check for Timeout
             uint8_t inflight = SM[i].swnd.next_seq_to_send - SM[i].swnd.unack_seq;
             if (inflight > 0 && (current_time - SM[i].last_msg_time >= T))
             {
-                // Timeout! Reset next_seq_to_send to force retransmission [cite: 96, 97]
                 SM[i].swnd.next_seq_to_send = SM[i].swnd.unack_seq;
             }
 
-            // 2. Transmit Pending Messages [cite: 98]
             int oldest_index = (SM[i].send_head - SM[i].send_count + 10) % 10;
             uint8_t offset = SM[i].swnd.next_seq_to_send - SM[i].swnd.unack_seq;
 
@@ -277,6 +263,7 @@ void *S_handler(void *arg)
                 pkt.type = 'D';
                 pkt.seq_num = SM[i].swnd.next_seq_to_send;
                 pkt.window_size = 0;
+                pkt.payload_len = SM[i].send_len[buffer_index];
 
                 char packet_buffer[MAX_PACKET_SIZE];
                 memcpy(packet_buffer, &pkt, sizeof(ktp_header));
@@ -294,6 +281,7 @@ void *S_handler(void *arg)
                 SM[i].last_msg_time = current_time;
                 SM[i].swnd.next_seq_to_send++;
                 offset = SM[i].swnd.next_seq_to_send - SM[i].swnd.unack_seq;
+                SM[i].total_udp_transmissions++;
             }
 
             pthread_mutex_unlock(&SM[i].mutex);
