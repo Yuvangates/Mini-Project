@@ -15,7 +15,7 @@
 #include <sys/ipc.h>
 
 #define T 5
-#define DROP_PROB 0.15
+#define DROP_PROB 0.4 // this is p
 #define MAX_SOCKETS 100
 #define SOCK_KTP 0x1234
 #define ENOTBOUND 1000

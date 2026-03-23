@@ -129,6 +129,11 @@ void *R_handler(void *arg)
                 {
                     if (dropMessage(DROP_PROB))
                     {
+                        if (bytes_received >= sizeof(ktp_header))
+                        {
+                            ktp_header *drop_hdr = (ktp_header *)packet_buffer;
+                            printf("Thread R: Packet dropped (simulated loss) - Type: %c, Seq: %d\n", drop_hdr->type, drop_hdr->seq_num);
+                        }
                         continue;
                     }
 
@@ -158,6 +163,8 @@ void *R_handler(void *arg)
 
                                 if (offset == 0)
                                 {
+                                    printf("Thread R: Received IN-ORDER Data Seq %d\n", header->seq_num);
+
                                     while (SM[i].recv_valid[SM[i].recv_head] && SM[i].recv_count < 10)
                                     {
                                         SM[i].rwnd.expected_seq++;
@@ -168,6 +175,7 @@ void *R_handler(void *arg)
                                     free_space = 10 - SM[i].total_messages_in_buffer;
                                     if (free_space == 0)
                                         SM[i].nospace = true;
+
                                     ktp_header ack_pkt;
                                     ack_pkt.type = 'A';
                                     ack_pkt.seq_num = SM[i].rwnd.expected_seq - 1;
@@ -175,10 +183,12 @@ void *R_handler(void *arg)
 
                                     sendto(current_fd, &ack_pkt, sizeof(ktp_header), 0,
                                            (struct sockaddr *)&sender_addr, sender_len);
+
+                                    printf("Thread R: Sent ACK %d (Window Size: %d)\n", ack_pkt.seq_num, ack_pkt.window_size);
                                 }
                                 else
                                 {
-                                    printf("Thread R: Buffered OUT-OF-ORDER Seq %d (Expected %d). No ACK sent.\n", header->seq_num, expected);
+                                    printf("Thread R: Buffered OUT-OF-ORDER Data Seq %d (Expected %d). No ACK sent.\n", header->seq_num, expected);
                                 }
 
                                 free_space = 10 - SM[i].total_messages_in_buffer;
@@ -194,6 +204,8 @@ void *R_handler(void *arg)
                         }
                         else if (offset >= free_space && offset > 128)
                         {
+                            printf("Thread R: Received DUPLICATE/OLD Data Seq %d. Resending ACK %d\n", header->seq_num, expected - 1);
+
                             ktp_header ack_pkt;
                             ack_pkt.type = 'A';
                             ack_pkt.seq_num = expected - 1;
@@ -217,10 +229,13 @@ void *R_handler(void *arg)
 
                             SM[i].swnd.unack_seq = header->seq_num + 1;
                             SM[i].swnd.window_size = header->window_size;
+
+                            printf("Thread R: Received NEW ACK Seq %d. Window slid forward.\n", header->seq_num);
                         }
                         else
                         {
                             SM[i].swnd.window_size = header->window_size;
+                            printf("Thread R: Received DUPLICATE ACK Seq %d. Window size updated to %d.\n", header->seq_num, header->window_size);
                         }
                     }
 
@@ -249,6 +264,7 @@ void *S_handler(void *arg)
             uint8_t inflight = SM[i].swnd.next_seq_to_send - SM[i].swnd.unack_seq;
             if (inflight > 0 && (current_time - SM[i].last_msg_time >= T))
             {
+                printf("Thread S: TIMEOUT! Retransmitting unacknowledged messages starting from Seq %d\n", SM[i].swnd.unack_seq);
                 SM[i].swnd.next_seq_to_send = SM[i].swnd.unack_seq;
             }
 
@@ -277,6 +293,8 @@ void *S_handler(void *arg)
 
                 sendto(SM[i].udp_sock_fd, packet_buffer, MAX_PACKET_SIZE, 0,
                        (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
+                printf("Thread S: Sent Data Seq %d (Payload: %d bytes)\n", pkt.seq_num, pkt.payload_len);
 
                 SM[i].last_msg_time = current_time;
                 SM[i].swnd.next_seq_to_send++;

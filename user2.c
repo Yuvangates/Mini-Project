@@ -31,7 +31,7 @@ int main()
     inet_pton(AF_INET, "127.0.0.1", &src_addr.sin_addr);
 
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(8080); 
+    dest_addr.sin_port = htons(8080);
     inet_pton(AF_INET, "127.0.0.1", &dest_addr.sin_addr);
 
     if (k_bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr),
@@ -48,7 +48,7 @@ int main()
         return 1;
     }
 
-    char buffer[CHUNK_SIZE + 1]; 
+    char buffer[CHUNK_SIZE + 1];
     struct sockaddr_in sender_addr;
     socklen_t sender_len = sizeof(sender_addr);
     int total_received = 0;
@@ -62,7 +62,7 @@ int main()
 
         if (bytes_received > 0)
         {
-            buffer[bytes_received] = '\0'; 
+            buffer[bytes_received] = '\0';
 
             if (strcmp(buffer, "<EOF>") == 0)
             {
@@ -77,8 +77,7 @@ int main()
         {
             if (my_errno == ENOMESSAGE)
             {
-                // No message available right now. Wait a bit before polling again.
-                usleep(10000); // Wait 10ms
+                usleep(10000);
             }
             else
             {
@@ -91,6 +90,10 @@ int main()
     printf("Total bytes received: %d\n", total_received);
 
     close(fd);
+
+    printf("Entering TIME_WAIT state for 12 seconds to ensure sender gets final ACKs...\n");
+    sleep(12);
+
     k_close(sock_fd);
     return 0;
 }

@@ -1,14 +1,10 @@
-# Makefile to create the executable for initksocket.c
-
 CC = gcc
 CFLAGS = -Wall -g
 LDFLAGS = -L. -lksocket
 PTHREAD = -lpthread
 
-# Target to build the initksocket executable
 initksocket: initksocket.c ksocket.h
 	$(CC) $(CFLAGS) initksocket.c -o initksocket $(PTHREAD) $(LDFLAGS)
 
-# Clean rule specific to initksocket
 clean:
 	rm -f initksocket

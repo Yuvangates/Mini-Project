@@ -1,0 +1,96 @@
+=====================================================
+Mini Project 1 Documentation
+Group Details:
+Member 1 Name: Dake Yuvan Gates (23CS10015)
+Member 2 Name: Marala Sai Pragnaan (23CS10043)
+=====================================================
+
+1. DATA STRUCTURES USED
+-----------------------
+* ktp_header: Appended to the front of every UDP packet. Contains 'type' ('D' for Data, 'A' for ACK), 'seq_num' (8-bit modulo-256 wrapping sequence number), 'window_size' (used by ACKs to piggyback the receiver's available buffer space), and 'payload_len' (tracks the actual bytes of data to avoid padding issues).
+* sender_wnd (swnd): Tracks the unacknowledged sequence base (unack_seq), the next sequence to send (next_seq_to_send), and the receiver's window size limit.
+* reciever_wnd (rwnd): Tracks the next expected in-order sequence number (expected_seq) and the current receiver window size.
+* Shared_Mem: The core IPC structure. It is an array of 100 elements, each representing a single KTP socket. It holds:
+   - Circular buffers for sending and receiving data (`send_buffer`, `recv_buffer`) and their corresponding payload lengths.
+   - Pointers for circular buffer management (`send_head`, `recv_head`, `user_read_head`).
+   - State flags like `isFree`, `nospace` (Zero Window indicator), and `recv_valid` array (tracks buffered out-of-order messages).
+   - Network linkage (Local Port, Destination IP/Port, PID, and the underlying UDP socket FD).
+   - Mutual exclusion is guaranteed via a process-shared `pthread_mutex_t`.
+
+
+2. FILES AND FUNCTIONS EXPLAINED
+--------------------------------
+* ksocket.h: The core header file containing all macros, constants (T, DROP_PROB), struct blueprints, and library function prototypes.
+
+* ksocket.c (The User-Facing Library API):
+  This library provides the standard socket interface to the user applications, masking the complex IPC and multithreading happening in the background.
+  - attach_shared_memory(): Internal helper that uses `ftok`, `shmget`, and `shmat` to link the user process to the global shared memory block.
+  - k_socket(): Finds an empty slot in the Shared_Mem array, initializes the window boundaries, sets tracking variables to 0, and returns the array index as the socket FD. It defers actual UDP socket creation to the daemon process to bypass Linux process-level FD isolation.
+  - k_bind(): Saves the local port and remote destination IP/Port into the shared memory slot to strictly enforce bound connections.
+  - k_sendto(): Performs a non-blocking write to the `send_buffer`. If the destination IP/Port mismatches, it returns ENOTBOUND. If the 10-slot buffer is full, it returns ENOSPACE.
+  - k_recvfrom(): Reads contiguous, in-order data from the `recv_buffer` into the user application. It then clears the slot, allowing the receiver window to slide forward. Returns ENOMESSAGE if no in-order data is ready.
+  - k_close(): Implements graceful teardown. It first blocks until `send_count == 0` (ensuring all local data is ACKed over the network). It then enters a 12-second `TIME_WAIT` state to absorb any delayed retransmissions from the peer before finally closing the UDP socket and freeing the IPC memory slot.
+  - dropMessage(): Simulates network loss by generating a random number between 0 and 1. If the number is less than DROP_PROB, it returns 1 (triggering a packet drop).
+
+* initksocket.c (The Background Daemon Process):
+  This file runs continuously in the background, executing the actual KTP transport layer logic via multithreading.
+  - main(): Initializes the POSIX shared memory block, sets up the process-shared mutex attributes, marks all 100 socket slots as free, and spawns the R, S, and GC threads.
+  - R_handler() [Receive Thread]: 
+      - Dynamically creates and binds underlying UDP sockets for any newly registered KTP sockets.
+      - Uses `select()` to multiplex and listen to all active UDP sockets simultaneously.
+      - On receiving Data ('D'): Checks if it is in-order (writes to buffer, slides window, sends ACK), out-of-order (buffers silently without ACK), or duplicate/old (drops data but resends ACK).
+      - On receiving ACK ('A'): Updates `swnd.window_size`. If it is a new ACK, it slides the `swnd.unack_seq` forward and frees send buffer space.
+      - Timeout & Zero Window: If `select()` times out and the `nospace` flag was true but space recently freed up, it shoots a duplicate Window Update ACK to wake up a paused sender.
+  - S_handler() [Send Thread]: 
+      - Wakes up every T/2 seconds. 
+      - Timeout Check: Calculates if `current_time - last_msg_time >= T`. If true, it simulates a Go-Back-N retransmission by rewinding `next_seq_to_send` back to `unack_seq`.
+      - Transmission Loop: Iterates through pending messages in `send_buffer` and transmits them over UDP, strictly respecting the peer's piggybacked `window_size`.
+  - GC_handler() [Garbage Collector]: Periodically runs `kill(pid, 0)` to check if a user application's process crashed unexpectedly. If the process is dead, it safely closes the UDP socket and frees the shared memory slot to prevent resource leaks.
+
+
+3. COMPILATION AND EXECUTION GUIDE
+----------------------------------
+To test the protocol, you need to compile the library, the daemon, and the user applications, and then run them across multiple terminal windows.
+
+Step 1: Compile the Code
+Run the following make commands in order to ensure the executables link to the freshest library build:
+  $ make -f Makefile.lib
+  $ make -f Makefile.init
+  $ make -f Makefile.users
+
+Step 2: Generate the Test File
+Create a dummy file larger than 100KB for user1 to send:
+  $ base64 /dev/urandom | head -c 150000 > input.txt
+
+Step 3: Run the Processes (Requires 3 Terminals)
+  * Terminal 1 (Start the Transport Daemon):
+    $ ./initksocket
+    (Leave this running. It will log all network events, drops, and window slides).
+
+  * Terminal 2 (Start the Receiver):
+    $ ./user2
+    (It will bind to port 8081 and wait for incoming data).
+
+  * Terminal 3 (Start the Sender):
+    $ ./user1
+    (It will bind to 8080, connect to 8081, and immediately begin transferring input.txt).
+
+Note on IPC Cleanup: If you force-quit (Ctrl+C) the programs during testing, the shared memory segment might persist in the OS. If `./initksocket` throws a segmentation fault or binding error on restart, clear the memory by finding the ID via `ipcs -m` and removing it via `ipcrm -m <shmid>`.
+
+
+4. PERFORMANCE TABLE (T = 5 seconds)
+------------------------------------
+File size transferred: 150 KB
+
+Probability (p) | Avg. Transmissions per Message
+------------------------------------------------
+0.05            | 1.17 (App Messages Given: 294, UDP Transmissions:  344)
+0.10            | 1.36 (App Messages Given: 294, UDP Transmissions:  400)
+0.15            | 1.82 (App Messages Given: 294, UDP Transmissions:  536)
+0.20            | 1.95 (App Messages Given: 294, UDP Transmissions:  574)
+0.25            | 2.19 (App Messages Given: 294, UDP Transmissions:  643)
+0.30            | 2.57 (App Messages Given: 294, UDP Transmissions:  757)
+0.35            | 2.80 (App Messages Given: 294, UDP Transmissions:  822)
+0.40            | 2.84 (App Messages Given: 294, UDP Transmissions:  836)
+0.45            | 3.44 (App Messages Given: 294, UDP Transmissions: 1012)
+0.50            | 3.78 (App Messages Given: 294, UDP Transmissions: 1111)
